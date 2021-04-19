@@ -12,15 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import paddle
-
-
-def device_count():
-    gpu_useful = paddle.get_device().startswith("gpu")
-    if gpu_useful:
-        device_str = os.environ["CUDA_VISIBLE_DEVICES"]
-        seg = device_str.split(",")
-        return len(seg)
-    else:
-        return 0
+TYPE_ORDER = ["bool", "int32", "int64", "float16", "float32", "float64"]
+TYPE_MAPPER = {"fp16": "float16", "fp32": "float32", "fp64": "float64"}

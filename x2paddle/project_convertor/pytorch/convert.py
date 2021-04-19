@@ -1,3 +1,17 @@
+# Copyright (c) 2021  PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ast
 import astor
 import os
@@ -6,8 +20,9 @@ import shutil
 import argparse
 from six import text_type as _text_type
 
-from .dependency_analysis import run as run_dependency
-from .ast_update import run as run_ast
+from .dependency_analyzer import analyze
+from .ast_update import update
+
 
 def write_file(path, tree):
     codes = astor.to_source(tree)
@@ -15,31 +30,34 @@ def write_file(path, tree):
     f = open(path, "w")
     f.write(codes)
     f.close()
-    
-def generate_dependency(folder_path, file_dependency):
+
+
+def generate_dependencies(folder_path, file_dependencies):
     for name in os.listdir(folder_path):
         current_path = osp.join(folder_path, name)
         if osp.isfile(current_path) and current_path.endswith(".py"):
-            if current_path in file_dependency:
+            if current_path in file_dependencies:
                 break
-            run_dependency(current_path, file_dependency)
+            analyze(current_path, file_dependencies)
         elif osp.isdir(current_path):
-            generate_dependency(current_path, file_dependency)
+            generate_dependencies(current_path, file_dependencies)
 
-def convert_code(folder_path, new_folder_path, file_dependency):
+
+def convert_code(folder_path, new_folder_path, file_dependencies):
     for name in os.listdir(folder_path):
         current_path = osp.join(folder_path, name)
         print(current_path)
         new_current_path = osp.join(new_folder_path, name)
         if osp.isfile(current_path) and current_path.endswith(".py"):
-            root = run_ast(current_path, file_dependency)
+            root = update(current_path, file_dependencies)
             if root is not None:
                 write_file(new_current_path, root)
         elif osp.isdir(current_path):
             if not osp.exists(new_current_path):
                 os.makedirs(new_current_path)
-            convert_code(current_path, new_current_path, file_dependency)
-        elif osp.isfile(current_path) and osp.splitext(current_path)[-1] in [".pth", ".pt", ".ckpt"]:
+            convert_code(current_path, new_current_path, file_dependencies)
+        elif osp.isfile(current_path) and osp.splitext(current_path)[
+                -1] in [".pth", ".pt", ".ckpt"]:
             continue
         elif osp.isfile(current_path) and current_path.endswith(".pyc"):
             continue
@@ -49,7 +67,8 @@ def convert_code(folder_path, new_folder_path, file_dependency):
             continue
         else:
             shutil.copyfile(current_path, new_current_path)
-            
+
+
 def convert_params(params_path):
     import torch
     import paddle
@@ -60,14 +79,19 @@ def convert_params(params_path):
         if k.endswith(".running_mean"):
             new_params[k.replace(".running_mean", "_mean")] = v.detach().numpy()
         elif k.endswith(".running_var"):
-            new_params[k.replace(".running_var", "_variance")] = v.detach().numpy()
+            new_params[k.replace(".running_var", "_variance")] = v.detach(
+            ).numpy()
             bn_w_name_list.append(k.replace(".running_var", ".weight"))
         else:
             new_params[k] = v.detach().numpy()
     for k, v in new_params.items():
-        if len(v.shape) == 2 and k.endswith(".weight") and k not in bn_w_name_list:
+        if len(v.shape) == 2 and k.endswith(
+                ".weight") and k not in bn_w_name_list:
             new_params[k] = v.T
-    paddle.save(new_params, params_path.replace(".pth", ".pdiparams").replace(".pt", ".pdiparams").replace(".ckpt", ".pdiparams"))
+    paddle.save(new_params,
+                params_path.replace(".pth", ".pdiparams").replace(
+                    ".pt", ".pdiparams").replace(".ckpt", ".pdiparams"))
+
 
 def main(args):
     project_path = args.project_dir
@@ -82,10 +106,8 @@ def main(args):
         else:
             convert_params(params_path)
     project_path = osp.abspath(project_path)
-    file_dependency = dict()
-    generate_dependency(project_path, file_dependency)
+    file_dependencies = dict()
+    generate_dependencies(project_path, file_dependencies)
     if not osp.exists(save_path):
         os.makedirs(save_path)
-    convert_code(project_path, save_path, file_dependency)
-    
-  
+    convert_code(project_path, save_path, file_dependencies)
