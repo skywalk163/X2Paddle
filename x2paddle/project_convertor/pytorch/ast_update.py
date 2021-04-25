@@ -43,7 +43,6 @@ class DepInfo:
 
 class AstUpdater(ast.NodeVisitor):
     """ 更新ast树，将ast树中PyTorch相关的节点转为Paddle相关的节点。
-
     Args:
         py_file_path (str): python文件的绝对值路径。
         file_dependencies (dict): 当前已经统计的依赖信息，key为python文件的绝对值路径，
@@ -107,7 +106,7 @@ class AstUpdater(ast.NodeVisitor):
                         (dep_info.PT_IMPORT is not None and "torch" in dep_info.PT_IMPORT):
                     replace_str = None
                     if dep_info.AS is not None and api_part_name.startswith(
-                            dep_info.AS):
+                            dep_info.AS + "."):
                         replace_str = dep_info.AS
                     elif dep_info.AS is None and api_part_name.startswith(
                             dep_info.PT_IMPORT):
@@ -251,7 +250,7 @@ class AstUpdater(ast.NodeVisitor):
                             scope_node = self._get_scope_node()
                             for i, n in enumerate(scope_node.body):
                                 if father_node == n:
-                                    scope_node.body.pop(i)
+                                    scope_node.body[i] = ast.parse("\n").body
                             is_remove = True
                         else:
                             self.no_support_apis.append(
@@ -287,7 +286,7 @@ class AstUpdater(ast.NodeVisitor):
                 scope_node = self._get_scope_node()
                 for i, n in enumerate(scope_node.body):
                     if father_node == n:
-                        scope_node.body.pop(i)
+                        scope_node.body[i] = ast.parse("\n").body
                 is_remove = True
             elif dep_info.PT_DEPENDENCY.startswith("torch"):
                 self.no_support_apis.append(dep_info.PT_DEPENDENCY)
@@ -299,6 +298,19 @@ class AstUpdater(ast.NodeVisitor):
     def visit_Name(self, node):
         """ 获取字符串名字。
         """
+        pytorch_api, dep_info = self._get_complete_api(getattr(node, "id"))
+        father_node = self._get_father_node()
+        if pytorch_api in API_MAPPER:
+            paddle_api = API_MAPPER[pytorch_api][0]
+            if isinstance(father_node, ast.Call) and getattr(
+                    father_node.func, "id", None) in ("getattr", "setattr",
+                                                      "hasattr"):
+                paddle_api = self._rename(paddle_api, dep_info, pytorch_api,
+                                          paddle_api)
+                for i, arg_node in enumerate(father_node.args):
+                    if astor.to_source(arg_node).strip() == getattr(node, "id"):
+                        father_node.args[i] = ast.parse(paddle_api).body[
+                            0].value
         return getattr(node, "id")
 
     def visit_Attribute(self, node):
@@ -323,6 +335,14 @@ class AstUpdater(ast.NodeVisitor):
                                         paddle_api)
                 if node in father_node.bases:
                     father_node.bases[0] = ast.parse(attr_str).body[0].value
+                return attr_str
+            elif isinstance(father_node, ast.arguments):
+                attr_str = self._rename(attr_str, dep_info, pytorch_api,
+                                        paddle_api)
+                for i, default_n in enumerate(father_node.defaults):
+                    if default_n == node:
+                        father_node.defaults[i] = ast.parse(attr_str).body[
+                            0].value
                 return attr_str
             elif isinstance(father_node, ast.Tuple):
                 paddle_api = self._rename(paddle_api, dep_info, pytorch_api,
@@ -359,7 +379,8 @@ class AstUpdater(ast.NodeVisitor):
                         break
                 return attr_str
         elif pytorch_api in REMOVE_API:
-            if isinstance(father_node, (ast.Assign, ast.If)):
+            if isinstance(father_node,
+                          (ast.Assign, ast.If, ast.FunctionDef, ast.ClassDef)):
                 scope_node = self._get_scope_node()
                 for i, n in enumerate(scope_node.body):
                     if father_node == n:
@@ -466,7 +487,8 @@ class AstUpdater(ast.NodeVisitor):
         scope_node = self._get_scope_node()
         if isinstance(ast.parse(new_code).body[0], ast.Assign):
             node_index = self._get_current_index(scope_node, node)
-            scope_node.body[node_index] = ast.parse(new_code).body[0]
+            scope_node.body[node_index] = ast.parse(
+                new_code.replace("\n", "")).body[0]
         else:
             new_call_node = ast.parse(new_code).body[0].value
             setattr(node, "func", new_call_node.func)  # 修改了fun_name
@@ -475,14 +497,16 @@ class AstUpdater(ast.NodeVisitor):
         for i, n in enumerate(scope_node.body):
             if father_node == n:
                 for code in prefix_insert_codes:
-                    scope_node.body.insert(i, ast.parse(code).body[0])
+                    scope_node.body.insert(
+                        i, ast.parse(code.replace("\n", "")).body[0])
                     i += 1
                 break
         for i, n in enumerate(scope_node.body):
             if father_node == n:
                 j = i + 1
                 for code in suffix_insert_codes:
-                    scope_node.body.insert(j, ast.parse(code).body[0])
+                    scope_node.body.insert(
+                        j, ast.parse(code.replace("\n", "")).body[0])
                     j += 1
                 break
 
@@ -494,7 +518,7 @@ class AstUpdater(ast.NodeVisitor):
         self.scopes_and_dependencies.append(node)
         self.generic_visit(node)
         last_node = self.scopes_and_dependencies.pop(-1)
-        while isinstance(last_node, DepInfo):
+        while not isinstance(last_node, ast.FunctionDef):
             last_node = self.scopes_and_dependencies.pop(-1)
 
     def visit_ClassDef(self, node):
@@ -505,7 +529,7 @@ class AstUpdater(ast.NodeVisitor):
         self.scopes_and_dependencies.append(node)
         self.generic_visit(node)
         last_node = self.scopes_and_dependencies.pop(-1)
-        while isinstance(last_node, DepInfo):
+        while not isinstance(last_node, ast.ClassDef):
             last_node = self.scopes_and_dependencies.pop(-1)
 
     def visit_If(self, node):
@@ -516,7 +540,7 @@ class AstUpdater(ast.NodeVisitor):
         self.scopes_and_dependencies.append(node)
         self.generic_visit(node)
         last_node = self.scopes_and_dependencies.pop(-1)
-        while isinstance(last_node, DepInfo):
+        while not isinstance(last_node, ast.If):
             last_node = self.scopes_and_dependencies.pop(-1)
 
     def visit_Try(self, node):
@@ -527,7 +551,7 @@ class AstUpdater(ast.NodeVisitor):
         self.scopes_and_dependencies.append(node)
         self.generic_visit(node)
         last_node = self.scopes_and_dependencies.pop(-1)
-        while isinstance(last_node, DepInfo):
+        while not isinstance(last_node, ast.Try):
             last_node = self.scopes_and_dependencies.pop(-1)
 
     def visit_ExtSlice(self, node):
